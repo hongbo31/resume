@@ -226,4 +226,53 @@ WHERE c.net_amount != st.amount;
 
 ---
 
+## 七、完整面试回答参考（可直接使用）
+
+### 7.1 业务介绍标准回答（1-2分钟版本）
+
+> "我们的Staking业务是完整的'质押-解押-收益'闭环，核心是三层架构：
+> 
+> **第一层是用户请求层**。用户主动发起Stake或Unstake，在request表创建记录，side字段区分方向（1=Stake流入，2=Unstake流出），经过OEX资金处理（Stake需要扣款，Unstake不需要），状态流转到pending等待日切。
+> 
+> **第二层是Cycle批次层**。每天上午10点统一处理，通过rebalancing计算：Stake聚合资金上链质押；Unstake判断是否能early redemption提前赎回，不能的就走链上withdraw到house_account，再转给用户。
+> 
+> **第三层是Reward收益层**。链上自动产生reward，我们withdraw回staking_account，然后通过定时的reward_cycle，根据每个用户的reward_eligible_qty按比例派发给用户。这个和Stake/Unstake是独立的定时任务。
+> 
+> **测试核心是保证三流一致**：资金流的金额准确、请求流的状态正确、数据流的关联完整。特别是reward派发，要验证每个用户的分配比例和实际到账金额。"
+
+### 7.2 详细展开版本（3-5分钟版本）
+
+**【Stake流程】**
+
+> "用户发起Stake，比如32个ETH，系统在dpos库的request表创建记录，状态status=1(new)。然后通过定时Job发Kafka消息给OEX系统，触发positionTransfer扣款任务。OEX处理完成后回调，request状态变为3(pending_approve)→4(pending)，这时候用户资金已冻结但还没真正上链质押。
+> 
+> 第二天上午10点，定时Job发起Cycle处理，捞取前一天所有pending状态的request，创建cycle记录(status=1)。然后进行rebalancing计算：汇总inflow/outflow，得出cycle需要实际处理的净金额。这个设计的目的是批量聚合降低链上Gas成本。
+> 
+> 接下来是链上执行层：根据cycle计算结果，操作staking_transaction表记录链上交易。资金从main_account转到stake_account，然后调用合约进行stake操作。这里会轮询等待链上确认，成功后request状态变为8(staked)。最后通过定时任务将staked转为10(completed)完成整个流程。"
+
+**【Unstake流程】**
+
+> "Unstake和Stake是对称但反向的流程。用户发起Unstake(side=2)，先进入pending状态，等第二天的Cycle处理。这里有个Early Redemption机制——如果rebalancing计算发现可以提前赎回部分资金，这批request会标记为status=6，在下一个Cycle优先处理。
+> 
+> 具体判断逻辑是：Cycle计算net_inflow = 当天新Stake金额 - 当天新Unstake金额。如果net_inflow为正，说明有新资金流入，可以优先满足pending的Unstake请求。
+> 
+> 不能提前赎回的，则走正常流程：从链上合约withdraw到公司的house_account，同时position表的residual_balance增加，等链上确认后再转给用户。链上withdraw有unbounding period约束，但我们的Early Redemption机制可以优化用户体验。"
+
+**【Reward派发】**
+
+> "Reward是被动产生的，用户不主动发起。链上自动产生reward后，我们通过withdraw拿回staking_account，然后通过定时的reward_cycle，根据reward_eligible_qty比例计算每个用户应得金额进行派发。
+> 
+> 派发时我们使用BigDecimal精确计算，按比例分配，尾差归集到最后一个用户，保证总和严格等于链上金额。同时记录calculated_amount和actual_amount，方便对账。"
+
+### 7.3 数据一致性回答
+
+> "我们重点校验三个点：
+> 1. request金额和OEX冻结金额一致（Stake资金冻结校验）
+> 2. cycle计算结果和链上实际stake金额一致（批次计算校验）
+> 3. 链上交易哈希和staking_transaction记录关联可溯源（链上交易校验）
+> 
+> 每天凌晨2点执行三层对账，发现不一致立即告警，暂停相关Cycle自动执行，人工核对后修复或调账。"
+
+---
+
 *文档生成：基于Crypto.AI项目实际业务整理*
